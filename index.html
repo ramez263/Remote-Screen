@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <title>Remote Screen - SQL.js + WebRTC</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma; background: #1e1e2f; color: #eee; margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    .container { background: #2a2a3d; padding: 2rem; border-radius: 15px; box-shadow: 0 0 25px #00000050; width: 90%; max-width: 700px; }
+    h2 { color: #ffb86c; text-align: center; }
+    button { background: #ff5555; color: white; border: none; padding: 12px 25px; border-radius: 8px; font-size: 1.1rem; cursor: pointer; margin: 0.5rem; transition: .3s; }
+    button:hover { background: #ff6e6e; }
+    button.blue { background: #6272a4; }
+    button.blue:hover { background: #7a8bc6; }
+    button.green { background: #50fa7b; color: #1e1e2f; }
+    button.green:hover { background: #69ff94; }
+    input, select { padding: 10px; border-radius: 8px; border: none; width: 100%; margin: 0.5rem 0; background: #3a3a4f; color: white; font-size: 1rem; box-sizing: border-box; }
+    .hidden { display: none; }
+    video { width: 100%; border-radius: 10px; border: 2px solid #ffb86c; margin-top: 1rem; background: #000; }
+    #status { margin: 1rem 0; text-align: center; color: #f1fa8c; }
+    .link-box { word-break: break-all; background: #44445a; padding: 10px; border-radius: 8px; margin: 0.5rem 0; }
+    .error { color: #ff5555; }
+    .info { color: #f1fa8c; background: #444; padding: 10px; border-radius: 8px; margin: 1rem 0; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h2>🔴 Remote Screen - SQL.js + WebRTC</h2>
+  
+  <!-- واجهة تسجيل الدخول -->
+  <div id="login-section">
+    <h3>لوحة الأدمن</h3>
+    <input type="password" id="admin-password" placeholder="أدخل باسورد الأدمن">
+    <p id="login-error" class="hidden error">❌ باسورد غلط</p>
+    <button class="blue" onclick="adminLogin()">دخول الأدمن</button>
+    <br><br>
+    <button onclick="showUserSection()">أنا مستخدم (أريد مشاركة شاشتي)</button>
+  </div>
+
+  <!-- واجهة المستخدم -->
+  <div id="user-section" class="hidden">
+    <h3>مشاركة الشاشة (User)</h3>
+    <button class="green" id="start-share">▶ بدء مشاركة الشاشة</button>
+    <div id="share-status"></div>
+    <div id="room-link-container" class="hidden">
+      <p>🎥 رابط الغرفة (أرسله للأدمن):</p>
+      <div class="link-box" id="room-link"></div>
+      <button class="blue" onclick="copyLink()">نسخ الرابط</button>
+      <p class="info">⚠️ الأدمن سيحتاج فقط إلى <strong>الجزء الطويل بعد ?room=</strong> الموجود في هذا الرابط.</p>
+    </div>
+    <button onclick="location.reload()">رجوع</button>
+  </div>
+
+  <!-- واجهة الأدمن -->
+  <div id="admin-section" class="hidden">
+    <h3>شاشة المستخدم البعيد</h3>
+    <p class="info">📋 ألصق هنا <strong>كود الغرفة</strong> الذي أرسله لك المستخدم (النص الطويل)، أو افتح الرابط الكامل مباشرة وسيتم تعبئته تلقائياً.</p>
+    <input type="text" id="room-id-input" placeholder="كود الغرفة (مثلاً: eb32bb...)">
+    <button class="blue" onclick="joinRoom()">اتصال بالغرفة</button>
+    <p id="admin-status"></p>
+    <video id="remote-video" autoplay playsinline class="hidden"></video>
+    <button onclick="location.reload()">تسجيل خروج</button>
+  </div>
+</div>
+
+<!-- تحميل Bugout أولاً للتأكد من وجودها -->
+<script src="https://cdn.jsdelivr.net/npm/bugout@0.0.13/dist/bugout.min.js"></script>
+<!-- تحميل SQL.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>
+
+<script>
+// التأكد من أن Bugout معرفة
+if (typeof Bugout === 'undefined') {
+  alert('خطأ: لم يتم تحميل مكتبة Bugout. تأكد من اتصالك بالإنترنت وحاول مجدداً.');
+}
+
+let db;
+async function initDB() {
+  const SQL = await initSqlJs({ locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/${file}` });
+  db = new SQL.Database();
+  db.run("CREATE TABLE IF NOT EXISTS admin (id INTEGER PRIMARY KEY, password TEXT)");
+  const result = db.exec("SELECT * FROM admin WHERE id = 1");
+  if (result.length === 0 || result[0].values.length === 0) {
+    db.run("INSERT INTO admin (id, password) VALUES (1, 'admin123')");
+  }
+  db.run("CREATE TABLE IF NOT EXISTS sessions (room_id TEXT PRIMARY KEY, created_at TEXT)");
+}
+initDB().catch(console.error);
+
+function validateAdminPassword(password) {
+  if (!db) return false;
+  const stmt = db.prepare("SELECT password FROM admin WHERE id = 1");
+  if (stmt.step()) {
+    const row = stmt.getAsObject();
+    return row.password === password;
+  }
+  return false;
+}
+
+function showUserSection() {
+  document.getElementById('login-section').classList.add('hidden');
+  document.getElementById('user-section').classList.remove('hidden');
+  document.getElementById('admin-section').classList.add('hidden');
+}
+
+function adminLogin() {
+  const pass = document.getElementById('admin-password').value;
+  if (validateAdminPassword(pass)) {
+    document.getElementById('login-section').classList.add('hidden');
+    document.getElementById('admin-section').classList.remove('hidden');
+    document.getElementById('user-section').classList.add('hidden');
+    const urlParams = new URLSearchParams(window.location.search);
+    const room = urlParams.get('room');
+    if (room) {
+      document.getElementById('room-id-input').value = room;
+    }
+  } else {
+    document.getElementById('login-error').classList.remove('hidden');
+  }
+}
+
+let bugout;
+let localStream;
+let pc;
+const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+document.getElementById('start-share').addEventListener('click', async () => {
+  try {
+    localStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    document.getElementById('share-status').innerText = '✅ تم بدء مشاركة الشاشة';
+    bugout = new Bugout();
+    const roomId = bugout.address();
+    const fullUrl = window.location.href.split('?')[0] + '?room=' + roomId;
+    document.getElementById('room-link').innerText = fullUrl;
+    document.getElementById('room-link-container').classList.remove('hidden');
+    
+    bugout.on('connections', (peerCount) => {
+      if (peerCount > 0) createOffer();
+    });
+    
+    bugout.on('message', (address, data) => {
+      try {
+        const msg = JSON.parse(data);
+        if (msg.type === 'answer') {
+          pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+        } else if (msg.type === 'ice-candidate' && msg.candidate) {
+          pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        }
+      } catch(e){}
+    });
+    
+    setupPeerConnection();
+    if (db) db.run("INSERT OR IGNORE INTO sessions VALUES (?, datetime('now'))", [roomId]);
+  } catch (err) {
+    alert('خطأ في مشاركة الشاشة: ' + err.message);
+  }
+});
+
+function setupPeerConnection() {
+  pc = new RTCPeerConnection(rtcConfig);
+  localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      bugout.send(JSON.stringify({ type: 'ice-candidate', candidate: event.candidate.toJSON() }));
+    }
+  };
+}
+
+async function createOffer() {
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  bugout.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription }));
+}
+
+function copyLink() {
+  const linkText = document.getElementById('room-link').innerText;
+  navigator.clipboard.writeText(linkText).then(() => alert('تم نسخ الرابط!'));
+}
+
+async function joinRoom() {
+  const roomId = document.getElementById('room-id-input').value.trim();
+  if (!roomId) return alert('أدخل كود الغرفة');
+  if (typeof Bugout === 'undefined') return alert('Bugout غير محملة. تأكد من الإنترنت.');
+  try {
+    bugout = new Bugout(roomId);
+    bugout.on('connections', () => {
+      document.getElementById('admin-status').innerText = '⏳ تم الاتصال، انتظار الشاشة...';
+    });
+    
+    bugout.on('message', (address, data) => {
+      const msg = JSON.parse(data);
+      if (msg.type === 'offer') {
+        handleOffer(msg.sdp);
+      } else if (msg.type === 'ice-candidate' && msg.candidate && pc) {
+        pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+      }
+    });
+    
+    pc = new RTCPeerConnection(rtcConfig);
+    pc.ontrack = (event) => {
+      const video = document.getElementById('remote-video');
+      video.srcObject = event.streams[0];
+      video.classList.remove('hidden');
+      document.getElementById('admin-status').innerText = '✅ الشاشة البعيدة شغالة';
+    };
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        bugout.send(JSON.stringify({ type: 'ice-candidate', candidate: event.candidate.toJSON() }));
+      }
+    };
+  } catch(err) {
+    alert('خطأ في الاتصال: ' + err.message);
+  }
+}
+
+async function handleOffer(offerSdp) {
+  await pc.setRemoteDescription(new RTCSessionDescription(offerSdp));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  bugout.send(JSON.stringify({ type: 'answer', sdp: pc.localDescription }));
+}
+</script>
+</body>
+  </html>
